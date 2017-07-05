@@ -235,8 +235,7 @@ export class DiscordStore {
       `
       UPDATE schema
       SET version = $ver
-      WHERE version = $old_ver
-      `, {$ver: ver, $old_ver: oldVer},
+      `, {$ver: ver},
     );
   }
 
