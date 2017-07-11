@@ -73,9 +73,12 @@ export class DiscordBot {
       client.on("guildMemberRemove", (oldMember) => { this.RemoveGuildMember(oldMember); });
       client.on("guildMemberUpdate", (_, newMember) => { this.UpdateGuildMember(newMember); });
       client.on("messageDelete", (msg) => {this.DeleteDiscordMessage(msg); });
-      client.on("message", (msg) => { Bluebird.delay(MSG_PROCESS_DELAY).then(() => {
-          this.OnMessage(msg);
-        });
+      const messageHandled = {};
+      client.on("message", (msg) => {
+        messageHandled[msg.channel.id] = Bluebird.all([
+          messageHandled[msg.channel.id] || Promise.resolve(),
+          Bluebird.delay(MSG_PROCESS_DELAY)
+        ]).then(() => this.OnMessage(msg));
       });
       log.info("DiscordBot", "Discord bot client logged in.");
       this.bot = client;
@@ -505,19 +508,19 @@ export class DiscordBot {
     });
   }
 
-  private OnMessage(msg: Discord.Message) {
+  private OnMessage(msg: Discord.Message): Promise<any> {
     const indexOfMsg = this.sentMessages.indexOf(msg.id);
     if (indexOfMsg !== -1) {
       log.verbose("DiscordBot", "Got repeated message, ignoring.");
       delete this.sentMessages[indexOfMsg];
-      return; // Skip *our* messages
+      return Promise.resolve(); // Skip *our* messages
     }
     if (msg.author.id === this.bot.user.id) {
       // We don't support double bridging.
-      return;
+      return Promise.resolve();
     }
     // Update presence because sometimes discord misses people.
-    this.UpdateUser(msg.author).then(() => {
+    return this.UpdateUser(msg.author).then(() => {
       return this.GetRoomIdsFromChannel(msg.channel).catch((err) => {
         log.verbose("DiscordBot", "No bridged rooms to send message to. Oh well.");
         return null;
@@ -528,8 +531,8 @@ export class DiscordBot {
       }
       const intent = this.GetIntentFromDiscordMember(msg.author);
       // Check Attachements
-      msg.attachments.forEach((attachment) => {
-        Util.UploadContentFromUrl(attachment.url, intent, attachment.filename).then((content) => {
+      return Bluebird.each(msg.attachments.array(), (attachment) => {
+        return Util.UploadContentFromUrl(attachment.url, intent, attachment.filename).then((content) => {
           const fileMime = mime.lookup(attachment.filename);
           const msgtype = attachment.height ? "m.image" : "m.file";
           const info = {
@@ -542,8 +545,8 @@ export class DiscordBot {
             info.w = attachment.width;
             info.h = attachment.height;
           }
-          rooms.forEach((room) => {
-            intent.sendMessage(room, {
+          return Bluebird.map(rooms, (room) => {
+            return intent.sendMessage(room, {
               body: attachment.filename,
               info,
               msgtype,
@@ -551,11 +554,11 @@ export class DiscordBot {
             });
           });
         });
-      });
-      if (msg.content !== null && msg.content !== "") {
-        this.msgProcessor.FormatDiscordMessage(msg).then((result) => {
-            rooms.forEach((room) => {
-              intent.sendMessage(room, {
+      }).then(() => {
+        if (msg.content === null || msg.content === "") return;
+        return this.msgProcessor.FormatDiscordMessage(msg).then((result) => {
+            return Bluebird.map(rooms, (room) => {
+              return intent.sendMessage(room, {
                 body: result.body,
                 msgtype: "m.text",
                 formatted_body: result.formattedBody,
@@ -570,7 +573,7 @@ export class DiscordBot {
                 });
             });
         });
-      }
+      })
     }).catch((err) => {
       log.verbose("DiscordBot", "Failed to send message into room.", err);
     });
