@@ -68,8 +68,8 @@ export class DiscordBot {
             return channel.fetchMessages({
               after: room.data['last_message']
             }).then((messages) => {
-              messages.array().reverse().forEach((message) => {
-                this.OnMessage(message, room);
+              return Bluebird.each(messages.array().reverse(), (message) => {
+                return this.OnMessage(message, room);
               });
               // TODO loop in case of > 50 messages
             });
@@ -516,20 +516,20 @@ export class DiscordBot {
     return content;
   }
 
-  private OnMessage(msg: Discord.Message, onlyRoom?: string) {
+  private OnMessage(msg: Discord.Message, onlyRoom?: string): Promise<any> {
     const indexOfMsg = this.sentMessages.indexOf(msg.id);
     if (indexOfMsg !== -1) {
       log.verbose("DiscordBot", "Got repeated message, ignoring.");
       delete this.sentMessages[indexOfMsg];
-      return; // Skip *our* messages
+      return Promise.resolve(); // Skip *our* messages
     }
     if (msg.author.id === this.bot.user.id) {
       // We don't support double bridging.
-      return;
+      return Promise.resolve();
     }
     // Update presence because sometimes discord misses people.
     this.UpdatePresence(msg.member);
-    this.UpdateUser(msg.author).then(() => {
+    return this.UpdateUser(msg.author).then(() => {
       return this.GetRoomIdsFromChannel(msg.channel).catch((err) => {
         log.verbose("DiscordBot", "No bridged rooms to send message to. Oh well.");
         return null;
@@ -540,8 +540,8 @@ export class DiscordBot {
       }
       const intent = this.bridge.getIntentFromLocalpart(`_discord_${msg.author.id}`);
       // Check Attachements
-      msg.attachments.forEach((attachment) => {
-        Util.UploadContentFromUrl(attachment.url, intent, attachment.filename).then((content) => {
+      return Bluebird.each(msg.attachments.array(), (attachment) => {
+        return Util.UploadContentFromUrl(attachment.url, intent, attachment.filename).then((content) => {
           const fileMime = mime.lookup(attachment.filename);
           const msgtype = attachment.height ? "m.image" : "m.file";
           const info = {
@@ -554,9 +554,9 @@ export class DiscordBot {
             info.w = attachment.width;
             info.h = attachment.height;
           }
-          rooms.forEach((room) => {
+          return Bluebird.map(rooms, (room) => {
             if (onlyRoom && onlyRoom !== room) return;
-            intent.sendMessage(room, {
+            return intent.sendMessage(room, {
               body: attachment.filename,
               info,
               msgtype,
@@ -564,14 +564,14 @@ export class DiscordBot {
             });
           });
         });
-      });
-      if (msg.content !== null && msg.content !== "") {
+      }).then(() => {
+        if (msg.content === null || msg.content === "") return;
         // Replace mentions.
         const content = this.FormatDiscordMessage(msg);
         const fBody = marked(content);
-        rooms.forEach((room) => {
+        return Bluebird.map(rooms, (room: string) => {
           if (onlyRoom && onlyRoom !== room) return;
-          intent.sendMessage(room, {
+          return intent.sendMessage(room, {
             body: content,
             msgtype: "m.text",
             formatted_body: fBody,
@@ -580,7 +580,7 @@ export class DiscordBot {
             return this.UpdateLastMessageId(msg.channel, room, msg.id);
           });
         });
-      }
+      });
     }).catch((err) => {
       log.verbose("DiscordBot", "Failed to send message into room.", err);
     });
