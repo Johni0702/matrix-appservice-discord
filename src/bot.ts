@@ -48,6 +48,34 @@ export class DiscordBot {
     return this.clientFactory.init().then(() => {
       return this.clientFactory.getClient();
     }).then((client: any) => {
+      const ready = Bluebird.map(client.users.values(), (user: Discord.User) => {
+        return this.UpdateUser(user).then(() => {
+          return Bluebird.map(client.guilds.values(), (guild: Discord.Guild) => {
+            const member = guild.members.get(user.id);
+            if (member) {
+              return this.UpdateGuildMember(member)
+            }
+          });
+        });
+      }).then(() => {
+        return Bluebird.map(client.channels.values(), (channel: Discord.TextChannel) => {
+          if (channel.type !== 'text') return;
+          return Bluebird.map(this.GetRoomsFromChannel(channel).catch((err) =>{
+            log.verbose("DiscordBot", `No bridged rooms for channel ${channel.id}, not syncing.`);
+            return [];
+          }), (room: any) => {
+            if (!room.data['last_message']) return;
+            return channel.fetchMessages({
+              after: room.data['last_message']
+            }).then((messages) => {
+              messages.array().reverse().forEach((message) => {
+                this.OnMessage(message, room);
+              });
+              // TODO loop in case of > 50 messages
+            });
+          });
+        });
+      });
       client.on("typingStart", (c, u) => { this.OnTyping(c, u, true); });
       client.on("typingStop", (c, u) => { this.OnTyping(c, u, false); });
       client.on("userUpdate", (_, newUser) => { this.UpdateUser(newUser); });
@@ -56,7 +84,7 @@ export class DiscordBot {
       client.on("guildMemberAdd", (newMember) => { this.AddGuildMember(newMember); });
       client.on("guildMemberRemove", (oldMember) => { this.RemoveGuildMember(oldMember); });
       client.on("guildMemberUpdate", (_, newMember) => { this.UpdateGuildMember(newMember); });
-      client.on("message", (msg) => { Bluebird.delay(MSG_PROCESS_DELAY).then(() => {
+      client.on("message", (msg) => { Bluebird.delay(MSG_PROCESS_DELAY, ready).then(() => {
           this.OnMessage(msg);
         });
       });
@@ -255,7 +283,25 @@ export class DiscordBot {
     return body;
   }
 
+  private UpdateLastMessageId(channel: Discord.Channel, roomId: string, lastMessage: string): Promise<any> {
+    const roomStore = this.bridge.getRoomStore();
+    return this.GetRoomsFromChannel(channel).then((rooms) => {
+      return Bluebird.map(rooms, (room) => {
+        if (room.matrix.getId() === roomId) {
+          room.data['last_message'] = lastMessage;
+          return roomStore.upsertEntry(room);
+        }
+      });
+    });
+  }
+
   private GetRoomIdsFromChannel(channel: Discord.Channel): Promise<string[]> {
+    return this.GetRoomsFromChannel(channel).then((rooms) => {
+      return rooms.map((room) => room.matrix.getId() as string);
+    });
+  }
+
+  private GetRoomsFromChannel(channel: Discord.Channel): Promise<any[]> {
     return this.bridge.getRoomStore().getEntriesByRemoteRoomData({
       discord_channel: channel.id,
     }).then((rooms) => {
@@ -263,7 +309,7 @@ export class DiscordBot {
         log.verbose("DiscordBot", `Couldn"t find room(s) for channel ${channel.id}.`);
         return Promise.reject("Room(s) not found.");
       }
-      return rooms.map((room) => room.matrix.getId() as string);
+      return rooms;
     });
   }
 
@@ -271,10 +317,6 @@ export class DiscordBot {
     return this.bridge.getRoomStore().getEntriesByRemoteRoomData({
       discord_guild: guild,
     }).then((rooms) => {
-      if (rooms.length === 0) {
-        log.verbose("DiscordBot", `Couldn"t find room(s) for guild id:${guild}.`);
-        return Promise.reject("Room(s) not found.");
-      }
       return rooms.map((room) => room.matrix.getId());
     });
   }
@@ -474,7 +516,7 @@ export class DiscordBot {
     return content;
   }
 
-  private OnMessage(msg: Discord.Message) {
+  private OnMessage(msg: Discord.Message, onlyRoom?: string) {
     const indexOfMsg = this.sentMessages.indexOf(msg.id);
     if (indexOfMsg !== -1) {
       log.verbose("DiscordBot", "Got repeated message, ignoring.");
@@ -513,6 +555,7 @@ export class DiscordBot {
             info.h = attachment.height;
           }
           rooms.forEach((room) => {
+            if (onlyRoom && onlyRoom !== room) return;
             intent.sendMessage(room, {
               body: attachment.filename,
               info,
@@ -527,11 +570,14 @@ export class DiscordBot {
         const content = this.FormatDiscordMessage(msg);
         const fBody = marked(content);
         rooms.forEach((room) => {
+          if (onlyRoom && onlyRoom !== room) return;
           intent.sendMessage(room, {
             body: content,
             msgtype: "m.text",
             formatted_body: fBody,
             format: "org.matrix.custom.html",
+          }).then(() => {
+            return this.UpdateLastMessageId(msg.channel, room, msg.id);
           });
         });
       }
