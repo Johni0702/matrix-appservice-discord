@@ -84,7 +84,13 @@ export class DiscordBot {
       client.on("guildMemberAdd", (newMember) => { this.AddGuildMember(newMember); });
       client.on("guildMemberRemove", (oldMember) => { this.RemoveGuildMember(oldMember); });
       client.on("guildMemberUpdate", (_, newMember) => { this.UpdateGuildMember(newMember); });
-      client.on("message", (msg) => { Bluebird.delay(MSG_PROCESS_DELAY, ready).then(() => {
+      const messageHandled = {};
+      client.on("message", (msg) => {
+        messageHandled[msg.channel.id] = Bluebird.all([
+          ready,
+          messageHandled[msg.channel.id] || Promise.resolve(),
+          Bluebird.delay(MSG_PROCESS_DELAY)
+        ]).then(() => {
           this.OnMessage(msg);
         });
       });
