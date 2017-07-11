@@ -234,8 +234,6 @@ export class DiscordBot {
   public InitJoinUser(member: Discord.GuildMember, roomIds: string[]): Promise<any> {
     const intent = this.bridge.getIntentFromLocalpart(`_discord_${member.id}`);
     return this.UpdateUser(member.user).then(() => {
-      return Bluebird.each(roomIds, (roomId) => intent.join(roomId));
-    }).then(() => {
       return this.UpdateGuildMember(member, roomIds);
     });
   }
@@ -426,11 +424,13 @@ export class DiscordBot {
       return roomIds || this.GetRoomIdsFromGuild(guildMember.guild.id);
     }), (room) => {
       log.verbose(`Updating ${room}`);
-      client.sendStateEvent(room, "m.room.member", {
+      return client.sendStateEvent(room, "m.room.member", {
         membership: "join",
         avatar_url: avatar,
         displayname: guildMember.displayName,
-      }, userId);
+      }, userId).then(() => {
+        this.bridge._setMemberEntry(room, userId, "join");
+      });
     }).catch((err) => {
       log.error("DiscordBot", "Failed to update guild member %s", err);
     });
