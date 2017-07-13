@@ -473,11 +473,20 @@ export class DiscordBot {
       return roomIds || this.GetRoomIdsFromGuild(guildMember.guild.id);
     }), (room) => {
       log.verbose(`Updating ${room}`);
-      return client.sendStateEvent(room, "m.room.member", {
+      // TODO might want to get this into matrix-appservice-bridge
+      const sendJoinEvent = () => client.sendStateEvent(room, "m.room.member", {
         membership: "join",
         avatar_url: avatar,
         displayname: guildMember.displayName,
-      }, userId).then(() => {
+      }, userId);
+      return sendJoinEvent().catch((e) => {
+        if (e.errcode !== "M_FORBIDDEN") {
+          throw e;
+        }
+        return this.bridge.getIntent().invite(room, userId).then(() => {
+          return sendJoinEvent();
+        });
+      }).then(() => {
         this.bridge._setMemberEntry(room, userId, "join");
       });
     }).catch((err) => {
