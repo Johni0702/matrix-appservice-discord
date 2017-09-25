@@ -106,13 +106,9 @@ export class MessageProcessor {
 
     public FindMentionsInPlainBody(body: string, members: Discord.GuildMember[]): string {
       for (const member of members) {
-        const matcher = escapeStringRegexp(member.user.username + "#" + member.user.discriminator) + "|" +
-                        escapeStringRegexp(member.displayName);
-        body = body.replace(
-            new RegExp(
-                `\\b(${matcher})(?=\\b)`
-                , "mig"), `<@!${member.id}>`,
-        );
+        const nick = escapeStringRegexp(member.displayName);
+        const pattern = `^${nick}(?=[,:\\s])|(?!\\s)${nick}$|(?!\\s")${nick}(?=[,:\\s])`;
+        body = body.replace(new RegExp(pattern, "g"), `<@!${member.id}>`);
       }
       return body;
     }
