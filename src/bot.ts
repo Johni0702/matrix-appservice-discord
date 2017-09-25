@@ -480,7 +480,7 @@ export class DiscordBot {
       const sendJoinEvent = () => client.sendStateEvent(room, "m.room.member", {
         membership: "join",
         avatar_url: avatar,
-        displayname: guildMember.displayName,
+        displayname: guildMember.displayName + " (Discord)",
       }, userId);
       return sendJoinEvent().catch((e) => {
         if (e.errcode !== "M_FORBIDDEN") {
