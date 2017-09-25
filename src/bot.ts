@@ -60,6 +60,16 @@ export class DiscordBot {
     return this.clientFactory.init().then(() => {
       return this.clientFactory.getClient();
     }).then((client: any) => {
+      const ready = Bluebird.map(client.users.values(), (user: Discord.User) => {
+        return this.UpdateUser(user).then(() => {
+          return Bluebird.map(client.guilds.values(), (guild: Discord.Guild) => {
+            const member = guild.members.get(user.id);
+            if (member) {
+              return this.UpdateGuildMember(member)
+            }
+          });
+        });
+      });
       if (!this.config.bridge.disableTypingNotifications) {
         client.on("typingStart", (c, u) => { this.OnTyping(c, u, true); });
         client.on("typingStop", (c, u) => { this.OnTyping(c, u, false);  });
@@ -76,6 +86,7 @@ export class DiscordBot {
       const messageHandled = {};
       client.on("message", (msg) => {
         messageHandled[msg.channel.id] = Bluebird.all([
+          ready,
           messageHandled[msg.channel.id] || Promise.resolve(),
           Bluebird.delay(MSG_PROCESS_DELAY)
         ]).then(() => this.OnMessage(msg));
@@ -355,10 +366,6 @@ export class DiscordBot {
     return this.bridge.getRoomStore().getEntriesByRemoteRoomData({
       discord_guild: guild,
     }).then((rooms) => {
-      if (rooms.length === 0) {
-        log.verbose("DiscordBot", `Couldn"t find room(s) for guild id:${guild}.`);
-        return Promise.reject("Room(s) not found.");
-      }
       return rooms.map((room) => room.matrix.getId());
     });
   }
