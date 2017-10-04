@@ -30,12 +30,14 @@ export class DiscordBot {
   private bridge: Bridge;
   private presenceInterval: any;
   private sentMessages: string[];
+  private messageQueue: { [channelId: string]: Bluebird<any> };
   private msgProcessor: MessageProcessor;
   private presenceHandler: PresenceHandler;
   constructor(config: DiscordBridgeConfig, store: DiscordStore) {
     this.config = config;
     this.store = store;
     this.sentMessages = [];
+    this.messageQueue = {};
     this.clientFactory = new DiscordClientFactory(store, config.auth);
     this.msgProcessor = new MessageProcessor(
       new MessageProcessorOpts(this.config.bridge.domain),
@@ -83,12 +85,11 @@ export class DiscordBot {
       client.on("guildMemberRemove", (oldMember) => { this.RemoveGuildMember(oldMember); });
       client.on("guildMemberUpdate", (_, newMember) => { this.UpdateGuildMember(newMember); });
       client.on("messageDelete", (msg) => {this.DeleteDiscordMessage(msg); });
-      const messageHandled = {};
       client.on("message", (msg) => {
-        messageHandled[msg.channel.id] = Bluebird.all([
+        this.messageQueue[msg.channel.id] = Bluebird.all([
           ready,
-          messageHandled[msg.channel.id] || Promise.resolve(),
-          Bluebird.delay(MSG_PROCESS_DELAY)
+          this.messageQueue[msg.channel.id] || Promise.resolve(),
+          Bluebird.delay(MSG_PROCESS_DELAY),
         ]).then(() => this.OnMessage(msg));
       });
       log.info("DiscordBot", "Discord bot client logged in.");
@@ -521,7 +522,7 @@ export class DiscordBot {
     });
   }
 
-  private OnMessage(msg: Discord.Message): Promise<any> {
+  private async OnMessage(msg: Discord.Message): Promise<any> {
     const indexOfMsg = this.sentMessages.indexOf(msg.id);
     if (indexOfMsg !== -1) {
       log.verbose("DiscordBot", "Got repeated message, ignoring.");
@@ -533,7 +534,7 @@ export class DiscordBot {
       return Promise.resolve();
     }
     // Update presence because sometimes discord misses people.
-    return this.UpdateUser(msg.author).then(() => {
+    await this.UpdateUser(msg.author).then(() => {
       return this.GetRoomIdsFromChannel(msg.channel).catch((err) => {
         log.verbose("DiscordBot", "No bridged rooms to send message to. Oh well.");
         return null;
@@ -570,7 +571,9 @@ export class DiscordBot {
           });
         });
       }).then(() => {
-        if (msg.content === null || msg.content === "") return;
+        if (msg.content === null || msg.content === "") {
+          return null;
+        }
         return this.msgProcessor.FormatDiscordMessage(msg).then((result) => {
             return Bluebird.map(rooms, (room) => {
               return intent.sendMessage(room, {
@@ -588,7 +591,7 @@ export class DiscordBot {
                 });
             });
         });
-      })
+      });
     }).catch((err) => {
       log.verbose("DiscordBot", "Failed to send message into room.", err);
     });
