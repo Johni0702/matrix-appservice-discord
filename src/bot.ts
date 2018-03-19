@@ -12,11 +12,14 @@ import * as log from "npmlog";
 import * as Bluebird from "bluebird";
 import * as mime from "mime";
 import * as path from "path";
+import { Provisioner } from "./provisioner";
 
 // Due to messages often arriving before we get a response from the send call,
 // messages get delayed from discord.
 const MSG_PROCESS_DELAY = 750;
 const MIN_PRESENCE_UPDATE_DELAY = 250;
+// TODO: This is bad. We should be serving the icon from the own homeserver.
+const MATRIX_ICON_URL = "https://matrix.org/_matrix/media/r0/download/matrix.org/mlxoESwIsTbJrfXyAAogrNxA";
 class ChannelLookupResult {
   public channel: Discord.TextChannel;
   public botUser: boolean;
@@ -33,7 +36,7 @@ export class DiscordBot {
   private messageQueue: { [channelId: string]: Bluebird<any> };
   private msgProcessor: MessageProcessor;
   private presenceHandler: PresenceHandler;
-  constructor(config: DiscordBridgeConfig, store: DiscordStore) {
+  constructor(config: DiscordBridgeConfig, store: DiscordStore, private provisioner: Provisioner) {
     this.config = config;
     this.store = store;
     this.sentMessages = [];
@@ -96,6 +99,9 @@ export class DiscordBot {
       this.bot = client;
 
       if (!this.config.bridge.disablePresence) {
+        if (!this.config.bridge.presenceInterval) {
+          this.config.bridge.presenceInterval = MIN_PRESENCE_UPDATE_DELAY;
+        }
         this.bot.guilds.forEach((guild) => {
             guild.members.forEach((member) => {
                 this.presenceHandler.EnqueueMember(member);
@@ -178,6 +184,15 @@ export class DiscordBot {
         const mxClient = this.bridge.getClientFactory().getClientAs();
         profile.avatar_url = mxClient.mxcUrlToHttp(profile.avatar_url);
       }
+      /* See issue #82
+      const isMarkdown = (event.content.format === "org.matrix.custom.html");
+      if (!isMarkdown) {
+        body = "\\" + body;
+      }
+      if (event.content.msgtype === "m.emote") {
+        body = `*${body}*`;
+      }
+      */
       return new Discord.RichEmbed({
         author: {
           name: profile.displayname,
@@ -196,10 +211,16 @@ export class DiscordBot {
     const mxClient = this.bridge.getClientFactory().getClientAs();
     log.verbose("DiscordBot", `Looking up ${guildId}_${channelId}`);
     const result = await this.LookupRoom(guildId, channelId, event.sender);
-    log.verbose("DiscordBot", `Found channel! Looking up ${event.sender}`);
     const chan = result.channel;
     const botUser = result.botUser;
-    const profile = result.botUser ? await mxClient.getProfileInfo(event.sender) : null;
+    let profile = null;
+    if (result.botUser) {
+        // We are doing this through webhooks so fetch the user profile.
+        profile = await mxClient.getStateEvent(event.room_id, "m.room.member", event.sender);
+        if (profile === null) {
+          log.warn("DiscordBot", `User ${event.sender} has no member state. That's odd.`);
+        }
+    }
     const embed = this.MatrixEventToEmbed(event, profile, chan);
     const opts: Discord.MessageOptions = {};
     const hasAttachment = ["m.image", "m.audio", "m.video", "m.file"].indexOf(event.content.msgtype) !== -1;
@@ -216,6 +237,14 @@ export class DiscordBot {
     if (botUser) {
       const webhooks = await chan.fetchWebhooks();
       hook = webhooks.filterArray((h) => h.name === "_matrix").pop();
+      // Create a new webhook if none already exists
+      try {
+        if (!hook) {
+          hook = await chan.createWebhook("_matrix", MATRIX_ICON_URL, "Matrix Bridge: Allow rich user messages");
+        }
+      } catch (err) {
+        log.error("DiscordBot", "Unable to create \"_matrix\" webhook. ", err);
+      }
     }
     try {
       if (!botUser) {
@@ -522,8 +551,9 @@ export class DiscordBot {
     });
   }
 
-  private async OnMessage(msg: Discord.Message): Promise<any> {
+  private async OnMessage(msg: Discord.Message) {
     const indexOfMsg = this.sentMessages.indexOf(msg.id);
+    const chan = <Discord.TextChannel> msg.channel;
     if (indexOfMsg !== -1) {
       log.verbose("DiscordBot", "Got repeated message, ignoring.");
       delete this.sentMessages[indexOfMsg];
@@ -533,6 +563,40 @@ export class DiscordBot {
       // We don't support double bridging.
       return Promise.resolve();
     }
+    // Issue #57: Detect webhooks
+    if (msg.webhookID != null) {
+      const webhook = (await chan.fetchWebhooks())
+                      .filterArray((h) => h.name === "_matrix").pop();
+      if (webhook != null && msg.webhookID === webhook.id) {
+        // Filter out our own webhook messages.
+        return;
+      }
+    }
+
+    // Check if there's an ongoing bridge request
+    if ((msg.content === "!approve" || msg.content === "!deny") && this.provisioner.HasPendingRequest(chan)) {
+      try {
+        const isApproved = msg.content === "!approve";
+        const successfullyBridged = await this.provisioner.MarkApproved(chan, msg.member, isApproved);
+        if (successfullyBridged && isApproved) {
+          msg.channel.sendMessage("Thanks for your response! The matrix bridge has been approved");
+        } else if (successfullyBridged && !isApproved) {
+          msg.channel.sendMessage("Thanks for your response! The matrix bridge has been declined");
+        } else {
+          msg.channel.sendMessage("Thanks for your response, however the time for responses has expired - sorry!");
+        }
+      } catch (err) {
+        if (err.message === "You do not have permission to manage webhooks in this channel") {
+          msg.channel.sendMessage(err.message);
+        } else {
+          log.error("DiscordBot", "Error processing room approval");
+          log.error("DiscordBot", err);
+        }
+      }
+
+      return; // stop processing - we're approving/declining the bridge request
+    }
+
     // Update presence because sometimes discord misses people.
     await this.UpdateUser(msg.author).then(() => {
       return this.GetRoomIdsFromChannel(msg.channel).catch((err) => {
@@ -567,6 +631,7 @@ export class DiscordBot {
               info,
               msgtype,
               url: content.mxcUrl,
+              external_url: attachment.url,
             });
           });
         });
@@ -606,9 +671,9 @@ export class DiscordBot {
         }
         while (storeEvent.Next()) {
           log.info("DiscordBot", `Deleting discord msg ${storeEvent.DiscordId}`);
-          const client = this.GetIntentFromDiscordMember(msg.author);
+          const intent = this.GetIntentFromDiscordMember(msg.author);
           const matrixIds = storeEvent.MatrixId.split(";");
-          await client.redactEvent(matrixIds[1], matrixIds[0]);
+          await intent.getClient().redactEvent(matrixIds[1], matrixIds[0]);
         }
     }
   }
