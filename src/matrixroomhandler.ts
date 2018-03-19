@@ -108,6 +108,11 @@ export class MatrixRoomHandler {
       log.verbose("MatrixRoomHandler", "Got non m.room.message event");
       promise = request.resolve();
     }
+    if (promise) {
+        promise = promise.then(() => {
+            return this.bridge.getIntent().sendReadReceipt(event.room_id, event.event_id);
+        });
+    }
     request.outcomeFrom(Bluebird.resolve(promise));
   }
 
