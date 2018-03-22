@@ -189,4 +189,16 @@ export class MessageProcessor {
       }
       return body;
     }
+
+    public EscapeLinks(event: any, body: string): string {
+        const previewDisabled = event.content["de.johni0702.disable_url_preview"];
+        if (previewDisabled instanceof Array) {
+            for (const url of previewDisabled) {
+                // Note: this is not optimal in case url only partially matches
+                //       the link but it's good enough for now
+                body = body.replace(url, `<${url}>`);
+            }
+        }
+        return body;
+    }
 }
