@@ -173,7 +173,7 @@ export class DiscordBot {
   }
 
   public MatrixEventToEmbed(event: any, profile: any, channel: Discord.TextChannel): Discord.RichEmbed {
-    const body = this.msgProcessor.EscapeLinks(event,
+    let   body = this.msgProcessor.EscapeLinks(event,
                  this.config.bridge.disableDiscordMentions ? event.content.body :
                  this.msgProcessor.FindMentionsInPlainBody(
                      event.content.body,
@@ -190,10 +190,10 @@ export class DiscordBot {
       if (!isMarkdown) {
         body = "\\" + body;
       }
+      */
       if (event.content.msgtype === "m.emote") {
         body = `*${body}*`;
       }
-      */
       return new Discord.RichEmbed({
         author: {
           name: profile.displayname,
